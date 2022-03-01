@@ -1,0 +1,79 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'Openjdk-17.0.2'
+        gradle 'Gradle-7.4'
+    }
+    environment {
+        AWS_DEFAULT_REGION="ap-east-1"
+        DOCKERHUB_CREDENTIALS = credentials('fwlok247')
+        dockerStop = 'docker stop multibranch || true'
+        dockerRemove = "docker rmi fwlok247/multibranch:${BRANCH_NAME} || true"
+        dockerRun ="docker run --rm -d --name multibranch -p 8888:8888 fwlok247/multibranch:${BRANCH_NAME}"
+    }
+    stages {
+        stage("Clean") {
+            steps {
+                echo "Executing clean"
+                sh 'chmod +x gradlew'
+                sh './gradlew clean'
+            }
+        }
+        stage("Build") {
+            steps {
+                echo "Executing build "
+                sh './gradlew assemble'
+            }
+        }
+        stage("Test") {
+            steps {
+                echo "Executing test"
+                sh './gradlew test'
+            }
+        }
+        stage("Docker build") {
+            steps {
+                script {
+                    if (env.BRANCH_NAME == 'master') {
+                        env.BRANCH_NAME = 'latest'
+                    }
+                }
+                echo "Executing docker build"
+                sh './gradlew docker'
+            }
+        }
+        stage("Docker hub push") {
+            steps {
+                echo "Executing docker hub push"
+                sh 'echo $DOCKERHUB_CREDENTIALS_PSW | docker login -u $DOCKERHUB_CREDENTIALS_USR --password-stdin'
+                sh "docker tag multibranch fwlok247/multibranch:${BRANCH_NAME}"
+                sh "docker push fwlok247/multibranch:${BRANCH_NAME}"
+            }
+        }
+        stage("ECR push") {
+            steps {
+                echo "Executing ECR push"
+                withCredentials([aws(credentialsId:'aws-credentials',accessKeyVariable:'AWS_ACCESS_KEY_ID',secretKeyVariable:'AWS_SECRET_ACCESS_KEY')]) {
+                    sh 'aws ecr get-login-password --region ap-east-1 | docker login --username AWS --password-stdin 658836551508.dkr.ecr.ap-east-1.amazonaws.com'
+                    sh "docker tag fwlok247/multibranch:${BRANCH_NAME} 658836551508.dkr.ecr.ap-east-1.amazonaws.com/multibranch:${BRANCH_NAME}"
+                    sh "docker push 658836551508.dkr.ecr.ap-east-1.amazonaws.com/multibranch:${BRANCH_NAME}"
+                }                
+            }
+        }
+        stage("EC2 deploy") {
+            steps {
+                echo "Executing EC2 deploy"
+                sshagent(['16.163.144.112']) {
+                    sh "ssh -o StrictHostKeyChecking=no ec2-user@16.163.144.112 ${dockerStop}"
+                    sh "ssh -o StrictHostKeyChecking=no ec2-user@16.163.144.112 ${dockerRemove}"
+                    sh "ssh -o StrictHostKeyChecking=no ec2-user@16.163.144.112 ${dockerRun}"
+                }
+            }
+        }
+    }
+    post {
+        always {
+            sh 'docker logout'
+        }
+    }
+}
